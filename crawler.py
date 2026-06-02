@@ -40,13 +40,17 @@ TARGET_KEYWORDS = [
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 # ─── 유틸 ────────────────────────────────────────────
-def load_seen_ids() -> set:
+def load_seen_posts() -> dict:
     if SEEN_IDS_FILE.exists():
-        return set(json.loads(SEEN_IDS_FILE.read_text()))
-    return set()
+        data = json.loads(SEEN_IDS_FILE.read_text())
+        # 구버전 list 형식 마이그레이션
+        if isinstance(data, list):
+            return {id_: {} for id_ in data}
+        return data
+    return {}
 
-def save_seen_ids(ids: set):
-    SEEN_IDS_FILE.write_text(json.dumps(sorted(ids), ensure_ascii=False, indent=2))
+def save_seen_posts(posts: dict):
+    SEEN_IDS_FILE.write_text(json.dumps(posts, ensure_ascii=False, indent=2))
 
 def is_target(title: str) -> bool:
     t = title.lower().replace(" ", "")
@@ -192,6 +196,27 @@ def send_slack(webhook_url: str, post: dict, summary: str, deadline: str | None,
                                   headers={"Content-Type": "application/json"})
     urllib.request.urlopen(req, timeout=10)
 
+def send_slack_reminder(webhook_url: str, active_posts: list[dict]):
+    import urllib.request
+    today = datetime.now().date()
+    if active_posts:
+        lines = []
+        for p in active_posts:
+            deadline = p.get("deadline")
+            dl_str = f"`{deadline}`" if deadline else "마감일 미확인"
+            lines.append(f"• <{p['url']}|{p['title']}> — {dl_str}")
+        body = "\n".join(lines)
+        text = (
+            f":zzz: *오늘 신규 컨설팅 공고 없음*\n\n"
+            f"*📋 마감 전 기존 공고 ({len(active_posts)}건)*\n{body}"
+        )
+    else:
+        text = ":zzz: *오늘 신규 컨설팅 공고 없음*\n마감 전 기존 공고도 없습니다."
+    data = json.dumps({"text": text, "username": "CareerJump봇", "icon_emoji": ":briefcase:"}).encode()
+    req = urllib.request.Request(webhook_url, data=data,
+                                  headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req, timeout=10)
+
 # ─── Google Calendar ─────────────────────────────────
 def get_calendar_service():
     creds = None
@@ -213,6 +238,9 @@ def add_calendar_event(service, post: dict, deadline_str: str):
         dl = datetime.strptime(deadline_str, "%Y-%m-%d")
     except ValueError:
         print(f"  [Calendar] 날짜 파싱 실패: {deadline_str}")
+        return
+    if dl.date() < datetime.now().date():
+        print(f"  [Calendar] 이미 지난 날짜 스킵: {deadline_str}")
         return
     event = {
         "summary":     f"[지원마감] {post['title']}",
@@ -246,7 +274,8 @@ def main():
         except Exception as e:
             print(f"[Calendar] 인증 실패 (계속 진행): {e}")
 
-    seen_ids = load_seen_ids()
+    seen_posts = load_seen_posts()
+    today = datetime.now().date()
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -262,11 +291,23 @@ def main():
         posts = fetch_board(page)
         print(f"  전체 게시글: {len(posts)}개")
 
-        new_posts = [p for p in posts if p["id"] not in seen_ids and is_target(p["title"])]
+        new_posts = [p for p in posts if p["id"] not in seen_posts and is_target(p["title"])]
         print(f"  신규 대상 공고: {len(new_posts)}개")
 
         if not new_posts:
-            print("  → 새 공고 없음. 종료.")
+            active = []
+            for id_, meta in seen_posts.items():
+                dl = meta.get("deadline")
+                if not dl:
+                    active.append(meta)
+                else:
+                    try:
+                        if datetime.strptime(dl, "%Y-%m-%d").date() >= today:
+                            active.append(meta)
+                    except ValueError:
+                        pass
+            send_slack_reminder(slack_webhook, active)
+            print(f"  → 새 공고 없음. 리마인더 전송 (마감 전 공고 {len(active)}건).")
             browser.close()
             return
 
@@ -284,13 +325,17 @@ def main():
                 if cal_service and deadline:
                     add_calendar_event(cal_service, post, deadline)
 
-                seen_ids.add(post["id"])
+                seen_posts[post["id"]] = {
+                    "title":    post["title"],
+                    "url":      post["url"],
+                    "deadline": deadline,
+                }
             except Exception as e:
                 print(f"  → 오류: {e}")
 
         browser.close()
 
-    save_seen_ids(seen_ids)
+    save_seen_posts(seen_posts)
     print(f"\n완료: {len(new_posts)}개 처리됨.")
 
 if __name__ == "__main__":
