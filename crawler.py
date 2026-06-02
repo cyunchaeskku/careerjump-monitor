@@ -7,6 +7,7 @@ CareerJump 취업공고 모니터링 크롤러
 import os, json, re, pickle
 from dotenv import load_dotenv
 load_dotenv()
+from openai import OpenAI
 from datetime import datetime
 from pathlib import Path
 
@@ -83,6 +84,43 @@ def summarize(text: str) -> str:
             break
     return "\n".join(result) if result else "\n".join(lines[:40])
 
+def llm_analyze(text: str) -> dict:
+    """LLM으로 공고 요약 + 마감일 추출. {"summary": str, "deadline": "YYYY-MM-DD" | None}"""
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        return {"summary": "", "deadline": None}
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            response_format={"type": "json_object"},
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "당신은 컨설팅 채용 공고를 분석하는 어시스턴트입니다.\n"
+                        "채용 공고 본문을 읽고 아래 JSON을 반환하세요:\n"
+                        "{\n"
+                        '  "summary": "• 회사/직무\\n• 주요 업무 (2~3줄)\\n• 자격 요건 (핵심만)\\n• 우대 사항 (핵심만) — 없는 항목 생략, 200자 이내",\n'
+                        '  "deadline": "YYYY-MM-DD 형식 마감일, 없으면 null"\n'
+                        "}\n"
+                        "deadline은 지원 마감일만 추출하세요. 모집 기간 종료일, 서류 마감일 등 모두 포함."
+                    ),
+                },
+                {"role": "user", "content": text[:4000]},
+            ],
+            max_tokens=500,
+            temperature=0.1,
+        )
+        result = json.loads(response.choices[0].message.content)
+        deadline = result.get("deadline")
+        if deadline and not re.match(r"^\d{4}-\d{2}-\d{2}$", str(deadline)):
+            deadline = None
+        return {"summary": result.get("summary", ""), "deadline": deadline}
+    except Exception as e:
+        print(f"  [LLM] 분석 실패: {e}")
+        return {"summary": "", "deadline": None}
+
 # ─── Playwright 크롤링 ───────────────────────────────
 def fetch_board(page) -> list[dict]:
     page.goto(BOARD_URL, wait_until="networkidle", timeout=30000)
@@ -107,22 +145,47 @@ def fetch_board(page) -> list[dict]:
             })
     return posts
 
+FOOTER_CUTOFF_MARKERS = [
+    "회사명 : 커리어점프",
+    "Career Jump Corp.",
+    "All rights reserved",
+    "사업자 번호",
+    "통신판매 등록번호",
+]
+
 def fetch_article(page, url: str) -> dict:
     page.goto(url, wait_until="networkidle", timeout=30000)
-    body = page.inner_text("body")
+    # 본문 컨테이너 우선 시도
+    for selector in [".board-view-content", ".article-content", ".view-content", ".post-content", "article", ".content"]:
+        el = page.query_selector(selector)
+        if el:
+            body = el.inner_text()
+            break
+    else:
+        body = page.inner_text("body")
+
+    # footer 텍스트 잘라내기
+    for marker in FOOTER_CUTOFF_MARKERS:
+        idx = body.find(marker)
+        if idx != -1:
+            body = body[:idx].strip()
+            break
+
     return {"body": body, "deadline": extract_deadline(body)}
 
 # ─── Slack ───────────────────────────────────────────
-def send_slack(webhook_url: str, post: dict, summary: str, deadline: str | None):
+def send_slack(webhook_url: str, post: dict, summary: str, deadline: str | None, llm_summary: str = ""):
     import urllib.request
     deadline_str = f"*📅 마감일:* `{deadline}`" if deadline else "*📅 마감일:* 글에서 직접 확인 필요"
+    llm_section = f"\n*🤖 AI 요약*\n{llm_summary}\n" if llm_summary else ""
     text = (
         f":loudspeaker: *새 컨설팅 공고 알림*\n"
         f"*제목:* {post['title']}\n"
         f"*등록일:* {post['date']}\n"
         f"{deadline_str}\n"
-        f"*링크:* {post['url']}\n\n"
-        f"```{summary[:1500]}```"
+        f"*링크:* {post['url']}\n"
+        f"{llm_section}\n"
+        f"*📄 공고 전문*\n```{summary[:1500]}```"
     )
     data = json.dumps({"text": text, "username": "CareerJump봇", "icon_emoji": ":briefcase:"}).encode()
     req = urllib.request.Request(webhook_url, data=data,
@@ -212,9 +275,10 @@ def main():
             try:
                 article  = fetch_article(page, post["url"])
                 summary  = summarize(article["body"])
-                deadline = article["deadline"]
+                llm      = llm_analyze(article["body"])
+                deadline = article["deadline"] or llm["deadline"]
 
-                send_slack(slack_webhook, post, summary, deadline)
+                send_slack(slack_webhook, post, summary, deadline, llm["summary"])
                 print(f"  → Slack 전송 완료 | 마감: {deadline or '미확인'}")
 
                 if cal_service and deadline:
