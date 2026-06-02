@@ -1,0 +1,7 @@
+.env
+seen_ids.json
+credentials.json
+token.pickle
+__pycache__/
+*.pyc
+*.log

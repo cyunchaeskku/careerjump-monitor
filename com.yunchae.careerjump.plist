@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.yunchae.careerjump</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- setup.sh 실행 후 PYTHON_PATH가 채워집니다 -->
+        <string>PYTHON_PATH_PLACEHOLDER</string>
+        <string>SCRIPT_PATH_PLACEHOLDER</string>
+    </array>
+
+    <!-- 매일 오전 9시 실행 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- 환경변수: SLACK_WEBHOOK_URL을 setup.sh가 채워줌 -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>SLACK_WEBHOOK_URL</key>
+        <string>SLACK_WEBHOOK_PLACEHOLDER</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>LOG_PATH_PLACEHOLDER/careerjump.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>LOG_PATH_PLACEHOLDER/careerjump_error.log</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
